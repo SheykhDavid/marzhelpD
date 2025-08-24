@@ -773,6 +773,51 @@ function generateStatusMessage($marzbanapi, $chatId, $lang, $sendMessage = true,
     }
 }
 
+
+// === Admins pagination helper (safe, 3 columns, 15 rows per page) ===
+if (!defined('ADMINS_COLS')) define('ADMINS_COLS', 3);
+if (!defined('ADMINS_ROWS_PER_PAGE')) define('ADMINS_ROWS_PER_PAGE', 15); // 15x3 = 45 buttons, under 100 limit
+
+function buildAdminsKeyboardPaged(array $adminRows, int $page, array $lang, bool $canManage): array {
+    $totalRows = count($adminRows);
+    $pages = max(1, (int)ceil($totalRows / ADMINS_ROWS_PER_PAGE));
+    $page = max(1, min($page, $pages));
+    $slice = array_slice($adminRows, ($page - 1) * ADMINS_ROWS_PER_PAGE, ADMINS_ROWS_PER_PAGE);
+
+    $keyboard = [
+        'inline_keyboard' => [
+            [
+                ['text' => 'زمان باقی‌مانده', 'callback_data' => 'noop'],
+                ['text' => 'حجم باقی‌مانده', 'callback_data' => 'noop'],
+                ['text' => 'یوزرنیم', 'callback_data' => 'noop']
+            ]
+        ]
+    ];
+
+    // keep 3-column rows stable (rows already contain 3 buttons)
+    foreach ($slice as $r) { $keyboard['inline_keyboard'][] = $r; }
+
+    if ($pages > 1) {
+        $nav = [];
+        if ($page > 1) { $nav[] = ['text' => '◀️ قبلی', 'callback_data' => 'manage_admins_page:' . ($page - 1)]; }
+        $nav[] = ['text' => "صفحه {$page}/{$pages}", 'callback_data' => 'noop'];
+        if ($page < $pages) { $nav[] = ['text' => 'بعدی ▶️', 'callback_data' => 'manage_admins_page:' . ($page + 1)]; }
+        $keyboard['inline_keyboard'][] = $nav;
+    }
+
+    if ($canManage) {
+        $keyboard['inline_keyboard'][] = [
+            ['text' => $lang['add_admin'], 'callback_data' => 'add_admin'],
+            ['text' => $lang['delete_admin'], 'callback_data' => 'delete_admin']
+        ];
+    }
+
+    $keyboard['inline_keyboard'][] = [
+        ['text' => $lang['back'], 'callback_data' => 'back_to_main']
+    ];
+
+    return $keyboard;
+}
 function handleCallbackQuery($callback_query) {
     global $botConn, $marzbanConn, $allowedUsers, $botDbPass, $vpnDbPass, $apiURL, $latestVersion, $marzbanapi;
 
@@ -1180,9 +1225,11 @@ function handleCallbackQuery($callback_query) {
             )
         ]);
     }
-        if ($data === 'manage_admins') {
+        
+if ($data === 'manage_admins') {
         global $marzbanAdminUsername; 
-        if (in_array($userId, $allowedUsers)) {
+        $canManage = in_array($userId, $allowedUsers);
+        if ($canManage) {
             $adminsResult = $marzbanConn->query("SELECT id, username FROM admins");
         } else {
             $stmt = $marzbanConn->prepare("SELECT id, username FROM admins WHERE telegram_id = ?");
@@ -1191,7 +1238,7 @@ function handleCallbackQuery($callback_query) {
             $adminsResult = $stmt->get_result();
         }
 
-        $admins = [];
+        $adminRows = [];
         while ($row = $adminsResult->fetch_assoc()) {
             if ($row['username'] === $marzbanAdminUsername) {
                 continue;
@@ -1200,7 +1247,7 @@ function handleCallbackQuery($callback_query) {
             if ($adminInfo) {
                 $remainingTraffic = $adminInfo['remainingTraffic'] === '♾️' ? 'نامحدود' : number_format($adminInfo['remainingTraffic'], 2) . ' گیگ';
                 $daysLeft = $adminInfo['daysLeft'] === '♾️' ? 'نامحدود' : $adminInfo['daysLeft'] . ' روز';
-                $admins[] = [
+                $adminRows[] = [
                     ['text' => $daysLeft, 'callback_data' => 'select_admin:' . $row['id']],
                     ['text' => $remainingTraffic, 'callback_data' => 'select_admin:' . $row['id']],
                     ['text' => $row['username'], 'callback_data' => 'select_admin:' . $row['id']]
@@ -1208,7 +1255,7 @@ function handleCallbackQuery($callback_query) {
             }
         }
 
-        if (empty($admins)) {
+        if (empty($adminRows)) {
             $stmt = $botConn->prepare("UPDATE user_states SET state = NULL WHERE user_id = ?");
             $stmt->bind_param("i", $chatId);
             $stmt->execute();
@@ -1226,32 +1273,13 @@ function handleCallbackQuery($callback_query) {
                 'chat_id' => $chatId,
                 'message_id' => $messageId,
                 'text' => $lang['no_admins'],
-                'reply_markup' => $keyboard
+                'reply_markup' => json_encode($keyboard)
             ]);
             return;
         }
 
-        $keyboard = [
-            'inline_keyboard' => [
-                [
-                    ['text' => 'زمان باقی‌مانده', 'callback_data' => 'noop'],
-                    ['text' => 'حجم باقی‌مانده', 'callback_data' => 'noop'],
-                    ['text' => 'یوزرنیم', 'callback_data' => 'noop']
-                ]
-            ]
-        ];
-
-        $keyboard['inline_keyboard'] = array_merge($keyboard['inline_keyboard'], $admins);
-
-        if (in_array($userId, $allowedUsers)) {
-            $keyboard['inline_keyboard'][] = [
-                ['text' => $lang['add_admin'], 'callback_data' => 'add_admin'],
-                ['text' => $lang['delete_admin'], 'callback_data' => 'delete_admin']
-            ];
-        }
-        $keyboard['inline_keyboard'][] = [
-            ['text' => $lang['back'], 'callback_data' => 'back_to_main']
-        ];
+        // Build page 1 keyboard
+        $keyboard = buildAdminsKeyboardPaged($adminRows, 1, $lang, $canManage);
 
         handleUserState('clear', $chatId);
 
@@ -1263,8 +1291,8 @@ function handleCallbackQuery($callback_query) {
             'reply_markup' => json_encode($keyboard)
         ]);
         return;
-    }        
-    if ($data === 'delete_admin') {
+    }
+if ($data === 'delete_admin') {
         $adminsResult = $marzbanConn->query("SELECT id, username FROM admins");
         $admins = [];
         while ($row = $adminsResult->fetch_assoc()) {
@@ -1281,6 +1309,58 @@ function handleCallbackQuery($callback_query) {
             'message_id' => $messageId,
             'text' => $lang['select_admin_to_delete'],
             'reply_markup' => $keyboard
+        ]);
+        return;
+    }
+
+    if (strpos($data, 'manage_admins_page:') === 0) {
+        $page = intval(substr($data, strlen('manage_admins_page:')));
+        if ($page < 1) { $page = 1; }
+
+        global $marzbanAdminUsername; 
+        $canManage = in_array($userId, $allowedUsers);
+        if ($canManage) {
+            $adminsResult = $marzbanConn->query("SELECT id, username FROM admins");
+        } else {
+            $stmt = $marzbanConn->prepare("SELECT id, username FROM admins WHERE telegram_id = ?");
+            $stmt->bind_param("i", $userId);
+            $stmt->execute();
+            $adminsResult = $stmt->get_result();
+        }
+
+        $adminRows = [];
+        while ($row = $adminsResult->fetch_assoc()) {
+            if ($row['username'] === $marzbanAdminUsername) { continue; }
+            $adminInfo = getAdminInfo($row['id']);
+            if ($adminInfo) {
+                $remainingTraffic = $adminInfo['remainingTraffic'] === '♾️' ? 'نامحدود' : number_format($adminInfo['remainingTraffic'], 2) . ' گیگ';
+                $daysLeft = $adminInfo['daysLeft'] === '♾️' ? 'نامحدود' : $adminInfo['daysLeft'] . ' روز';
+                $adminRows[] = [
+                    ['text' => $daysLeft, 'callback_data' => 'select_admin:' . $row['id']],
+                    ['text' => $remainingTraffic, 'callback_data' => 'select_admin:' . $row['id']],
+                    ['text' => $row['username'], 'callback_data' => 'select_admin:' . $row['id']]
+                ];
+            }
+        }
+
+        $keyboard = buildAdminsKeyboardPaged($adminRows, $page, $lang, $canManage);
+
+        // Only update markup (faster, cleaner)
+        sendRequest('editMessageReplyMarkup', [
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'reply_markup' => json_encode($keyboard)
+        ]);
+
+        sendRequest('answerCallbackQuery', [
+            'callback_query_id' => $callbackId
+        ]);
+        return;
+    }
+
+    if ($data === 'noop') {
+        sendRequest('answerCallbackQuery', [
+            'callback_query_id' => $callbackId
         ]);
         return;
     }
